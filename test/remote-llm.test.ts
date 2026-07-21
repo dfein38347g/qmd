@@ -779,6 +779,164 @@ describe("HybridLLM", () => {
       warnSpy.mockRestore();
     }
   });
+
+  describe("truncateForEmbed", () => {
+    function createTruncatableLocalLLM(tokenLength: number): LLM {
+      return {
+        embedModelName: "local-model",
+        generateModelName: "local-generate-model",
+        rerankModelName: "local-rerank-model",
+        embed: async () => ({ embedding: [0.5], model: "local-model" }),
+        embedBatch: async (texts) => texts.map(() => ({ embedding: [0.5], model: "local-model" })),
+        generate: async () => ({ text: "expanded", model: "local-model", done: true }),
+        modelExists: async (model) => ({ name: model, exists: true }),
+        expandQuery: async () => [{ type: "lex" as const, text: "expanded query" }],
+        rerank: async (_query, documents) => ({
+          results: documents.map((doc, index) => ({ file: doc.file, score: 0.42, index })),
+          model: "local-rerank-model",
+        }),
+        tokenize: async (text: string) => {
+          // Produce tokens proportional to text length, plus a configurable extra
+          const length = text.length;
+          const baseTokens = Math.ceil(length / 3);
+          return new Array(baseTokens + tokenLength).fill(1) as any;
+        },
+        detokenize: async (tokens: readonly number[]) => {
+          // Produce a shorter text than original to simulate truncation
+          return `truncated(${tokens.length} tokens)`;
+        },
+        dispose: async () => {},
+      };
+    }
+
+    it("passes short text through without truncation", async () => {
+      setMockHandler(() => ({
+        status: 200,
+        body: { data: [{ embedding: [0.9], index: 0 }] },
+      }));
+
+      const remote = createRemoteLLM();
+      // Local tokenizer returns length-based tokens that are well under 2048
+      const local = createTruncatableLocalLLM(0);
+      const hybrid = new HybridLLM(remote, local);
+
+      const result = await hybrid.embed("short text");
+      // Remote returns 0.9 — if truncation didn't change the text, the mock
+      // handler received the original "short text" and returned [0.9]
+      expect(result!.embedding).toEqual([0.9]);
+    });
+
+    it("truncates long text before sending to remote", async () => {
+      let receivedText = "";
+      setMockHandler((_req, body) => {
+        const parsed = JSON.parse(body);
+        receivedText = parsed.input[0];
+        return {
+          status: 200,
+          body: { data: [{ embedding: [0.8], index: 0 }] },
+        };
+      });
+
+      const remote = createRemoteLLM();
+      // Local tokenizer returns length-based tokens + 3000 extra, > 2048
+      const local = createTruncatableLocalLLM(3000);
+      const hybrid = new HybridLLM(remote, local);
+
+      await hybrid.embed("a".repeat(100));
+      // The text should have been truncated — detokenize produces
+      // "truncated(N tokens)" format
+      expect(receivedText).toMatch(/^truncated\(/);
+    });
+
+    it("passes text through unchanged in embedBatch when under limit", async () => {
+      setMockHandler((_req, body) => {
+        const parsed = JSON.parse(body);
+        return {
+          status: 200,
+          body: {
+            data: parsed.input.map((_: string, i: number) => ({
+              embedding: [0.9 + i * 0.01],
+              index: i,
+            })),
+          },
+        };
+      });
+
+      const remote = createRemoteLLM();
+      const local = createTruncatableLocalLLM(0);
+      const hybrid = new HybridLLM(remote, local);
+
+      const results = await hybrid.embedBatch(["a", "b"]);
+      expect(results[0]!.embedding).toEqual([0.9]);
+      expect(results[1]!.embedding).toEqual([0.91]);
+    });
+
+    it("truncates oversized texts in embedBatch", async () => {
+      const receivedTexts: string[] = [];
+      setMockHandler((_req, body) => {
+        const parsed = JSON.parse(body);
+        receivedTexts.push(...parsed.input);
+        return {
+          status: 200,
+          body: {
+            data: parsed.input.map((_: string, i: number) => ({
+              embedding: [0.7 + i * 0.01],
+              index: i,
+            })),
+          },
+        };
+      });
+
+      const remote = createRemoteLLM();
+      const local = createTruncatableLocalLLM(3000);
+      const hybrid = new HybridLLM(remote, local);
+
+      const results = await hybrid.embedBatch(["short", "also short"]);
+      // Both should have been truncated
+      expect(receivedTexts[0]).toMatch(/^truncated\(/);
+      expect(receivedTexts[1]).toMatch(/^truncated\(/);
+      // But results should still be valid (remote was reached)
+      expect(results).toHaveLength(2);
+      expect(results[0]).not.toBeNull();
+    });
+
+    it("returns original text when truncation would produce empty text", async () => {
+      const badLocal: LLM = {
+        embedModelName: "local-model",
+        generateModelName: "local-generate-model",
+        rerankModelName: "local-rerank-model",
+        embed: async () => ({ embedding: [0.5], model: "local-model" }),
+        embedBatch: async (texts) => texts.map(() => ({ embedding: [0.5], model: "local-model" })),
+        generate: async () => ({ text: "expanded", model: "local-model", done: true }),
+        modelExists: async (model) => ({ name: model, exists: true }),
+        expandQuery: async () => [{ type: "lex" as const, text: "expanded query" }],
+        rerank: async (_query, documents) => ({
+          results: documents.map((doc, index) => ({ file: doc.file, score: 0.42, index })),
+          model: "local-rerank-model",
+        }),
+        tokenize: async () => new Array(5000).fill(1) as any,
+        detokenize: async () => "",  // returns empty string
+        dispose: async () => {},
+      };
+
+      let receivedText = "";
+      setMockHandler((_req, body) => {
+        const parsed = JSON.parse(body);
+        receivedText = parsed.input[0];
+        return {
+          status: 200,
+          body: { data: [{ embedding: [0.9], index: 0 }] },
+        };
+      });
+
+      const remote = createRemoteLLM();
+      const hybrid = new HybridLLM(remote, badLocal);
+
+      await hybrid.embed("some text");
+      // Should have sent original text, not empty string
+      expect(receivedText).toBe("some text");
+    });
+  });
 });
 
 describe("createConfiguredLLM", () => {
