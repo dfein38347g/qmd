@@ -303,6 +303,16 @@ export function resolveRerankModel(config?: ModelResolutionConfig): string {
   return config?.rerank || process.env.QMD_RERANK_MODEL || DEFAULT_RERANK_MODEL;
 }
 
+/**
+ * Resolve the max token limit for embedding context.
+ * Reads QMD_EMBED_CONTEXT_SIZE env var; falls back to 2048.
+ * Used by both LlamaCpp (local) and HybridLLM (remote truncation guard).
+ */
+export function resolveEmbedContextSize(): number {
+  const v = parseInt(process.env.QMD_EMBED_CONTEXT_SIZE ?? "", 10);
+  return Number.isFinite(v) && v > 0 ? v : 2048;
+}
+
 export function resolveModels(config?: ModelResolutionConfig): Required<ModelResolutionConfig> {
   return {
     embed: resolveEmbedModel(config),
@@ -1235,10 +1245,7 @@ export class LlamaCpp implements LLM {
     return Number.isFinite(v) && v > 0 ? v : 4096;
   })();
 
-  private static readonly EMBED_CONTEXT_SIZE: number = (() => {
-    const v = parseInt(process.env.QMD_EMBED_CONTEXT_SIZE ?? "", 10);
-    return Number.isFinite(v) && v > 0 ? v : 2048;
-  })();
+  private static readonly EMBED_CONTEXT_SIZE: number = resolveEmbedContextSize();
   private async ensureRerankContexts(): Promise<Awaited<ReturnType<LlamaModel["createRankingContext"]>>[]> {
     if (this.rerankContexts.length === 0) {
       const model = await this.ensureRerankModel();

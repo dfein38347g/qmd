@@ -9,7 +9,7 @@ import { createServer, type Server, type IncomingMessage, type ServerResponse } 
 import { createConfiguredLLM } from "../src/configured-llm.js";
 import { RemoteLLM, remoteConfigFromEnv, type RemoteLLMConfig } from "../src/remote-llm.js";
 import { HybridLLM } from "../src/hybrid-llm.js";
-import { isRemoteModel, formatQueryForEmbedding, formatDocForEmbedding, getDefaultLLM, setDefaultLLM, LlamaCpp } from "../src/llm.js";
+import { isRemoteModel, formatQueryForEmbedding, formatDocForEmbedding, getDefaultLLM, setDefaultLLM, LlamaCpp, resolveEmbedContextSize } from "../src/llm.js";
 import type { LLM, EmbeddingResult, RerankResult, Queryable, GenerateResult, ModelInfo } from "../src/llm.js";
 
 // =============================================================================
@@ -801,6 +801,42 @@ describe("formatDocForEmbedding with remote models", () => {
 
   it("should include title when provided for remote models", () => {
     expect(formatDocForEmbedding("doc text", "My Title", "BAAI/bge-m3")).toBe("My Title\ndoc text");
+  });
+});
+
+describe("resolveEmbedContextSize", () => {
+  const origEnv = { ...process.env };
+
+  beforeEach(() => {
+    delete process.env.QMD_EMBED_CONTEXT_SIZE;
+  });
+
+  afterEach(() => {
+    delete process.env.QMD_EMBED_CONTEXT_SIZE;
+    if (origEnv.QMD_EMBED_CONTEXT_SIZE !== undefined) {
+      process.env.QMD_EMBED_CONTEXT_SIZE = origEnv.QMD_EMBED_CONTEXT_SIZE;
+    }
+  });
+
+  it("returns 2048 when env var is unset", () => {
+    expect(resolveEmbedContextSize()).toBe(2048);
+  });
+
+  it("returns parsed value when env var is a positive integer", () => {
+    process.env.QMD_EMBED_CONTEXT_SIZE = "4096";
+    expect(resolveEmbedContextSize()).toBe(4096);
+  });
+
+  it("returns 2048 when env var is not a valid number", () => {
+    process.env.QMD_EMBED_CONTEXT_SIZE = "not-a-number";
+    expect(resolveEmbedContextSize()).toBe(2048);
+  });
+
+  it("returns 2048 when env var is zero or negative", () => {
+    process.env.QMD_EMBED_CONTEXT_SIZE = "0";
+    expect(resolveEmbedContextSize()).toBe(2048);
+    process.env.QMD_EMBED_CONTEXT_SIZE = "-100";
+    expect(resolveEmbedContextSize()).toBe(2048);
   });
 });
 
