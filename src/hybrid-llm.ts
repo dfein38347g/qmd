@@ -22,6 +22,7 @@ import type {
 } from "./llm.js";
 import type { Token as LlamaToken } from "node-llama-cpp";
 import { RemoteLLM } from "./remote-llm.js";
+import { resolveEmbedContextSize } from "./llm.js";
 
 export class HybridLLM implements LLM {
   constructor(
@@ -56,12 +57,27 @@ export class HybridLLM implements LLM {
   }
 
   // Route to remote
-  embed(text: string, options?: EmbedOptions): Promise<EmbeddingResult | null> {
-    return this.remote.embed(text, options);
+  async embed(text: string, options?: EmbedOptions): Promise<EmbeddingResult | null> {
+    const safeText = await this.truncateForEmbed(text);
+    return this.remote.embed(safeText, options);
   }
 
-  embedBatch(texts: string[], options?: EmbedOptions): Promise<(EmbeddingResult | null)[]> {
-    return this.remote.embedBatch(texts, options);
+  async embedBatch(texts: string[], options?: EmbedOptions): Promise<(EmbeddingResult | null)[]> {
+    const safeTexts = await Promise.all(texts.map(t => this.truncateForEmbed(t)));
+    return this.remote.embedBatch(safeTexts, options);
+  }
+
+  private async truncateForEmbed(text: string): Promise<string> {
+    const maxTokens = resolveEmbedContextSize();
+    if (maxTokens <= 0) return text;
+    const tokens = await this.local.tokenize(text);
+    if (tokens.length <= maxTokens) return text;
+    const safeLimit = Math.max(1, maxTokens - 4);
+    const truncatedTokens = tokens.slice(0, safeLimit);
+    const truncatedText = await this.local.detokenize(truncatedTokens);
+    if (truncatedText.length === 0) return text;
+    console.warn(`⚠ Text truncated to fit embedding context (${maxTokens} tokens)`);
+    return truncatedText;
   }
 
   async rerank(query: string, documents: RerankDocument[], options?: RerankOptions): Promise<RerankResult> {

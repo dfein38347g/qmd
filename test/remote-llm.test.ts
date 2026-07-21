@@ -4,7 +4,7 @@
  * Uses a local HTTP server to mock OpenAI-compatible endpoints.
  */
 
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from "vitest";
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from "http";
 import { createConfiguredLLM } from "../src/configured-llm.js";
 import { RemoteLLM, remoteConfigFromEnv, type RemoteLLMConfig } from "../src/remote-llm.js";
@@ -657,6 +657,127 @@ describe("HybridLLM", () => {
       local,
     );
     expect(remoteExpandHybrid.expandModelName).toBe("remote-chat");
+  });
+
+  it("should truncate oversized text before embedding via remote", async () => {
+    process.env.QMD_EMBED_CONTEXT_SIZE = "3";
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      let receivedInput: string[] = [];
+      setMockHandler((_req, body) => {
+        const parsed = JSON.parse(body);
+        receivedInput = parsed.input;
+        return {
+          status: 200,
+          body: { data: [{ embedding: [0.9], index: 0 }] },
+        };
+      });
+
+      const localTokens = Array.from({ length: 10 }, (_, i) => i + 1) as any;
+      const local: LLM = {
+        embedModelName: "local-model",
+        generateModelName: "local-generate-model",
+        rerankModelName: "local-rerank-model",
+        embed: async () => ({ embedding: [0.5], model: "local-model" }),
+        embedBatch: async (texts) => texts.map(() => ({ embedding: [0.5], model: "local-model" })),
+        generate: async () => ({ text: "expanded", model: "local-model", done: true }),
+        modelExists: async (model) => ({ name: model, exists: true }),
+        expandQuery: async () => [{ type: "lex" as const, text: "expanded query" }],
+        rerank: async (_query, documents) => ({
+          results: documents.map((doc, index) => ({ file: doc.file, score: 0.42, index })),
+          model: "local-rerank-model",
+        }),
+        tokenize: async () => localTokens,
+        detokenize: async () => "truncated-text",
+        dispose: async () => {},
+      };
+
+      const remote = createRemoteLLM();
+      const hybrid = new HybridLLM(remote, local);
+
+      await hybrid.embed("this is a very long text that should be truncated");
+      expect(receivedInput).toEqual(["truncated-text"]);
+      expect(warnSpy).toHaveBeenCalled();
+    } finally {
+      warnSpy.mockRestore();
+      delete process.env.QMD_EMBED_CONTEXT_SIZE;
+    }
+  });
+
+  it("should truncate oversized texts before batch embedding via remote", async () => {
+    process.env.QMD_EMBED_CONTEXT_SIZE = "3";
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      let receivedInputs: string[][] = [];
+      setMockHandler((_req, body) => {
+        const parsed = JSON.parse(body);
+        receivedInputs.push(parsed.input);
+        return {
+          status: 200,
+          body: {
+            data: parsed.input.map((_: string, i: number) => ({
+              embedding: [0.9 + i * 0.01],
+              index: i,
+            })),
+          },
+        };
+      });
+
+      const localTokens = Array.from({ length: 10 }, (_, i) => i + 1) as any;
+      const local: LLM = {
+        embedModelName: "local-model",
+        generateModelName: "local-generate-model",
+        rerankModelName: "local-rerank-model",
+        embed: async () => ({ embedding: [0.5], model: "local-model" }),
+        embedBatch: async (texts) => texts.map(() => ({ embedding: [0.5], model: "local-model" })),
+        generate: async () => ({ text: "expanded", model: "local-model", done: true }),
+        modelExists: async (model) => ({ name: model, exists: true }),
+        expandQuery: async () => [{ type: "lex" as const, text: "expanded query" }],
+        rerank: async (_query, documents) => ({
+          results: documents.map((doc, index) => ({ file: doc.file, score: 0.42, index })),
+          model: "local-rerank-model",
+        }),
+        tokenize: async () => localTokens,
+        detokenize: async () => "truncated-text",
+        dispose: async () => {},
+      };
+
+      const remote = createRemoteLLM();
+      const hybrid = new HybridLLM(remote, local);
+
+      await hybrid.embedBatch(["long text 1", "long text 2"]);
+      expect(receivedInputs).toHaveLength(1);
+      expect(receivedInputs[0]).toEqual(["truncated-text", "truncated-text"]);
+      expect(warnSpy).toHaveBeenCalled();
+    } finally {
+      warnSpy.mockRestore();
+      delete process.env.QMD_EMBED_CONTEXT_SIZE;
+    }
+  });
+
+  it("should not truncate text within context limit", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      let receivedInput: string[] = [];
+      setMockHandler((_req, body) => {
+        const parsed = JSON.parse(body);
+        receivedInput = parsed.input;
+        return {
+          status: 200,
+          body: { data: [{ embedding: [0.9], index: 0 }] },
+        };
+      });
+
+      const remote = createRemoteLLM();
+      const local = createMockLocalLLM();
+      const hybrid = new HybridLLM(remote, local);
+
+      await hybrid.embed("short text");
+      expect(receivedInput).toEqual(["short text"]);
+      expect(warnSpy).not.toHaveBeenCalled();
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 });
 
