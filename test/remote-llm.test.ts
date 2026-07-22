@@ -810,10 +810,15 @@ describe("HybridLLM", () => {
     }
 
     it("passes short text through without truncation", async () => {
-      setMockHandler(() => ({
-        status: 200,
-        body: { data: [{ embedding: [0.9], index: 0 }] },
-      }));
+      let receivedInput: string[] = [];
+      setMockHandler((_req, body) => {
+        const parsed = JSON.parse(body);
+        receivedInput = parsed.input;
+        return {
+          status: 200,
+          body: { data: [{ embedding: [0.9], index: 0 }] },
+        };
+      });
 
       const remote = createRemoteLLM();
       // Local tokenizer returns length-based tokens that are well under 2048
@@ -823,29 +828,35 @@ describe("HybridLLM", () => {
       const result = await hybrid.embed("short text");
       // Remote returns 0.9 — if truncation didn't change the text, the mock
       // handler received the original "short text" and returned [0.9]
+      expect(receivedInput).toEqual(["short text"]);
       expect(result!.embedding).toEqual([0.9]);
     });
 
     it("truncates long text before sending to remote", async () => {
-      let receivedText = "";
-      setMockHandler((_req, body) => {
-        const parsed = JSON.parse(body);
-        receivedText = parsed.input[0];
-        return {
-          status: 200,
-          body: { data: [{ embedding: [0.8], index: 0 }] },
-        };
-      });
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        let receivedText = "";
+        setMockHandler((_req, body) => {
+          const parsed = JSON.parse(body);
+          receivedText = parsed.input[0];
+          return {
+            status: 200,
+            body: { data: [{ embedding: [0.8], index: 0 }] },
+          };
+        });
 
-      const remote = createRemoteLLM();
-      // Local tokenizer returns length-based tokens + 3000 extra, > 2048
-      const local = createTruncatableLocalLLM(3000);
-      const hybrid = new HybridLLM(remote, local);
+        const remote = createRemoteLLM();
+        // Local tokenizer returns length-based tokens + 3000 extra, > 2048
+        const local = createTruncatableLocalLLM(3000);
+        const hybrid = new HybridLLM(remote, local);
 
-      await hybrid.embed("a".repeat(100));
-      // The text should have been truncated — detokenize produces
-      // "truncated(N tokens)" format
-      expect(receivedText).toMatch(/^truncated\(/);
+        await hybrid.embed("a".repeat(100));
+        // The text should have been truncated — detokenize produces
+        // "truncated(N tokens)" format
+        expect(receivedText).toMatch(/^truncated\(/);
+      } finally {
+        warnSpy.mockRestore();
+      }
     });
 
     it("passes text through unchanged in embedBatch when under limit", async () => {
@@ -872,32 +883,37 @@ describe("HybridLLM", () => {
     });
 
     it("truncates oversized texts in embedBatch", async () => {
-      const receivedTexts: string[] = [];
-      setMockHandler((_req, body) => {
-        const parsed = JSON.parse(body);
-        receivedTexts.push(...parsed.input);
-        return {
-          status: 200,
-          body: {
-            data: parsed.input.map((_: string, i: number) => ({
-              embedding: [0.7 + i * 0.01],
-              index: i,
-            })),
-          },
-        };
-      });
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const receivedTexts: string[] = [];
+        setMockHandler((_req, body) => {
+          const parsed = JSON.parse(body);
+          receivedTexts.push(...parsed.input);
+          return {
+            status: 200,
+            body: {
+              data: parsed.input.map((_: string, i: number) => ({
+                embedding: [0.7 + i * 0.01],
+                index: i,
+              })),
+            },
+          };
+        });
 
-      const remote = createRemoteLLM();
-      const local = createTruncatableLocalLLM(3000);
-      const hybrid = new HybridLLM(remote, local);
+        const remote = createRemoteLLM();
+        const local = createTruncatableLocalLLM(3000);
+        const hybrid = new HybridLLM(remote, local);
 
-      const results = await hybrid.embedBatch(["short", "also short"]);
-      // Both should have been truncated
-      expect(receivedTexts[0]).toMatch(/^truncated\(/);
-      expect(receivedTexts[1]).toMatch(/^truncated\(/);
-      // But results should still be valid (remote was reached)
-      expect(results).toHaveLength(2);
-      expect(results[0]).not.toBeNull();
+        const results = await hybrid.embedBatch(["short", "also short"]);
+        // Both should have been truncated
+        expect(receivedTexts[0]).toMatch(/^truncated\(/);
+        expect(receivedTexts[1]).toMatch(/^truncated\(/);
+        // But results should still be valid (remote was reached)
+        expect(results).toHaveLength(2);
+        expect(results[0]).not.toBeNull();
+      } finally {
+        warnSpy.mockRestore();
+      }
     });
 
     it("returns original text when truncation would produce empty text", async () => {
@@ -935,6 +951,38 @@ describe("HybridLLM", () => {
       await hybrid.embed("some text");
       // Should have sent original text, not empty string
       expect(receivedText).toBe("some text");
+    });
+
+    it("respects custom QMD_EMBED_CONTEXT_SIZE for truncation", async () => {
+      process.env.QMD_EMBED_CONTEXT_SIZE = "100";
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        let receivedText = "";
+        setMockHandler((_req, body) => {
+          const parsed = JSON.parse(body);
+          receivedText = parsed.input[0];
+          return {
+            status: 200,
+            body: { data: [{ embedding: [0.6], index: 0 }] },
+          };
+        });
+
+        const remote = createRemoteLLM();
+        // Local tokenizer returns length-based tokens + 0 extra.
+        // 303 chars → Math.ceil(303/3) = 101 tokens, exceeds custom limit of 100
+        // but well under the default 2048.
+        const local = createTruncatableLocalLLM(0);
+        const hybrid = new HybridLLM(remote, local);
+
+        await hybrid.embed("a".repeat(303));
+        // With QMD_EMBED_CONTEXT_SIZE=100, 101 tokens should be truncated.
+        // Under the default 2048 limit, this text would pass through unchanged.
+        expect(receivedText).toMatch(/^truncated\(/);
+        expect(warnSpy).toHaveBeenCalled();
+      } finally {
+        warnSpy.mockRestore();
+        delete process.env.QMD_EMBED_CONTEXT_SIZE;
+      }
     });
   });
 });
