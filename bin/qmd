@@ -1,6 +1,12 @@
-#!/usr/bin/env node
+#!/home/nathan/.hermes/node/bin/node
 // 2>/dev/null; if command -v node >/dev/null 2>&1; then exec node "$0" "$@"; else exec bun "$0" "$@"; fi
 // Cross-platform launcher for qmd.
+//
+// NOTE (personal checkout, ubuntunix): the shebang is pinned to hermes Node 22
+// (ABI 127) because this checkout's native deps (better-sqlite3, sqlite-vec)
+// are kept built for that runtime, and the production consumers (remnic / RMO,
+// qmd-mcp) resolve `qmd` through this file via PATH. Portable installs (Nix
+// derivation / npm global) keep `#!/usr/bin/env node` -- see #381.
 //
 // Previously this was a POSIX shell script with `#!/bin/sh`, which meant npm
 // on Windows generated shims that tried to route through `/bin/sh` — a path
@@ -141,6 +147,25 @@ if (existsSync(resolve(pkgDir, "package-lock.json"))) {
 const runner = useSourceMode ? sourceRunner : (runnerName === "node" ? "node" : "bun");
 const args = useSourceMode ? sourceArgs : [jsEntry, ...process.argv.slice(2)];
 const needsShell = (runner === "bun") && process.platform === "win32";
+
+// ABI tripwire (2026-09-12, incident: RMO warm-up looped 1800+ times on
+// ERR_DLOPEN_FAILED). When the resolved runner is Node, the Node the launcher
+// itself runs under is the Node (same PATH, same spawn) that will load the
+// native deps. If it is not the ABI-127 (Node 22) build target this checkout's
+// deps use, fail here with a message that says what happened, instead of dying
+// inside process.dlopen with a stack trace. Bun is exempt: Nix-managed bun
+// loads the current addon set without issue and has no Node-ABI constraint.
+if (runner === "node" && process.versions.modules !== "127") {
+  console.error(
+    `qmd: native deps in this checkout are built for Node 22 (ABI 127), but the ` +
+      `resolved Node runner reports ABI ${process.versions.modules} (Node ${process.version}).\n` +
+      `  If node_modules was just (re)installed by a different Node, rebuild the native ` +
+      `modules for Node 22:\n` +
+      `    cd ${pkgDir} && PATH="$HOME/.hermes/node/bin:$PATH" npm rebuild better-sqlite3\n` +
+      `  (or re-run the install with hermes Node 22 first on PATH).`
+  );
+  process.exit(1);
+}
 
 const child = spawn(runner, args, {
   stdio: "inherit",
