@@ -46,6 +46,14 @@ export interface ModelsConfig {
   embed_api_model?: string;
   /** Bearer token for remote embedding API */
   embed_api_key?: string;
+  /**
+   * Prompt format applied to text before sending it to the REMOTE embedder.
+   * - "auto" (default): remote passes raw text; the server is assumed to format.
+   * - "embeddinggemma": apply the nomic/EmbeddingGemma task prefixes client-side.
+   * - "qwen3": apply the Qwen3-Instruct query prefix client-side.
+   * Set this when the remote server does NOT apply model-specific prefixes.
+   */
+  embed_prompt_format?: "auto" | "embeddinggemma" | "qwen3";
   /** Remote rerank API base URL (defaults to embed_api_url) */
   rerank_api_url?: string;
   /** Remote rerank model name */

@@ -1224,7 +1224,7 @@ describe("Caching", () => {
     await cleanupTestDb(store);
   });
 
-  test("rerank cache uses the model that actually produced fallback scores", async () => {
+  test("rerank cache is keyed on the model that produced the scores", async () => {
     const store = await createTestStore();
     const query = "same rerank query";
     const docs = [{ file: "doc.md", text: "same chunk text" }];
@@ -2595,6 +2595,20 @@ describe("Index Status", () => {
     expect(store.getHashesNeedingEmbedding()).toBe(1);
 
     await cleanupTestDb(store);
+  });
+
+  test("embedding fingerprint changes when the remote prompt format changes", () => {
+    const prev = process.env.QMD_EMBED_PROMPT_FORMAT;
+    try {
+      process.env.QMD_EMBED_PROMPT_FORMAT = "auto";
+      const underAuto = getEmbeddingFingerprint("BAAI/bge-m3");
+      process.env.QMD_EMBED_PROMPT_FORMAT = "embeddinggemma";
+      const underGemma = getEmbeddingFingerprint("BAAI/bge-m3");
+      expect(underGemma).not.toBe(underAuto);
+    } finally {
+      if (prev === undefined) delete process.env.QMD_EMBED_PROMPT_FORMAT;
+      else process.env.QMD_EMBED_PROMPT_FORMAT = prev;
+    }
   });
 
   test("getIndexHealth returns health info", async () => {

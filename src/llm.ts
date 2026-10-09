@@ -10,6 +10,8 @@ import type {
   LlamaEmbeddingContext,
   Token as LlamaToken,
 } from "node-llama-cpp";
+import { loadConfig } from "./collections.js";
+import type { ModelsConfig } from "./collections.js";
 
 type StdoutChunk = string | Uint8Array;
 type WriteCallback = (err?: Error | null) => void;
@@ -95,16 +97,96 @@ export function isRemoteModel(modelUri: string): boolean {
   return !modelUri.startsWith("hf:") && !modelUri.endsWith(".gguf");
 }
 
+export type EmbedPromptFormat = "auto" | "embeddinggemma" | "qwen3";
+
+const EMBED_PROMPT_FORMATS: readonly EmbedPromptFormat[] = ["auto", "embeddinggemma", "qwen3"];
+
+/**
+ * Normalise a prompt-format value to a known format, defaulting to "auto".
+ *
+ * An unrecognised value degrades to "auto" rather than throwing, so a typo in
+ * config or in a caller-supplied override cannot break search.
+ */
+function normaliseEmbedPromptFormat(raw: string | undefined): EmbedPromptFormat {
+  const value = (raw ?? "auto").trim().toLowerCase();
+  return (EMBED_PROMPT_FORMATS as readonly string[]).includes(value)
+    ? (value as EmbedPromptFormat)
+    : "auto";
+}
+
+let cachedEmbedPromptFormat: EmbedPromptFormat | null = null;
+
+/**
+ * Read embed_prompt_format from the index.yml models block, memoized.
+ *
+ * loadConfig() re-reads and re-parses the YAML on every call and throws on a
+ * malformed file, so calling it from the formatters would mean one YAML parse
+ * per chunk across a ~71k-chunk re-embed. qmd is a CLI, so the value cannot
+ * change within a run and a process-lifetime cache is correct. A missing or
+ * malformed index.yml degrades to "auto" (today's passthrough) rather than
+ * breaking embedding.
+ */
+function embedPromptFormatFromIndexConfig(): EmbedPromptFormat {
+  if (cachedEmbedPromptFormat !== null) return cachedEmbedPromptFormat;
+  try {
+    cachedEmbedPromptFormat = normaliseEmbedPromptFormat(
+      loadConfig().models?.embed_prompt_format,
+    );
+  } catch {
+    cachedEmbedPromptFormat = "auto";
+  }
+  return cachedEmbedPromptFormat;
+}
+
+/**
+ * Resolve the prompt format for the remote embedder.
+ *
+ * A remote server is assumed to apply model-specific prefixes itself, which is
+ * why "auto" passes text through untouched. That assumption does not hold for
+ * llama-swap serving google/embeddinggemma-2: the engine applies no prefix at
+ * all, and the model card states that omitting them "still works but reduces
+ * precision". Set embed_prompt_format when the server does not format.
+ *
+ * Precedence: QMD_EMBED_PROMPT_FORMAT (operator override), then an explicitly
+ * passed config, then the index.yml models block, then "auto". An unrecognised
+ * value is ignored rather than throwing, so a typo degrades to today's behaviour
+ * instead of breaking search.
+ *
+ * The index.yml key is the load-bearing one: index and query formatting must
+ * never disagree, and an env var would have to be set identically by remnic, by
+ * hand, and by every shell. If they drift, document and query vectors land in
+ * different spaces and retrieval degrades silently.
+ */
+export function resolveEmbedPromptFormat(config?: ModelsConfig): EmbedPromptFormat {
+  return normaliseEmbedPromptFormat(
+    process.env.QMD_EMBED_PROMPT_FORMAT
+      ?? config?.embed_prompt_format
+      ?? embedPromptFormatFromIndexConfig(),
+  );
+}
+
 /**
  * Format a query for embedding.
  * Uses nomic-style task prefix format for embeddinggemma (default).
  * Uses Qwen3-Embedding instruct format when a Qwen embedding model is active.
- * Remote models receive raw text (they handle their own formatting).
+ * Remote models receive raw text (they handle their own formatting), unless
+ * promptFormat opts in to client-side formatting.
  */
-export function formatQueryForEmbedding(query: string, modelUri?: string): string {
+export function formatQueryForEmbedding(
+  query: string,
+  modelUri?: string,
+  promptFormat?: EmbedPromptFormat,
+): string {
   const uri = modelUri ?? resolveEmbedModel();
-  if (isRemoteModel(uri)) return query;
-  if (isQwen3EmbeddingModel(uri)) {
+  const fmt = promptFormat !== undefined
+    ? normaliseEmbedPromptFormat(promptFormat)
+    : resolveEmbedPromptFormat();
+  const forced = fmt !== "auto";
+  // A remote server does not apply model-specific prefixes. Under "auto" we
+  // keep that contract and pass text through; an explicit opt-in formats here
+  // instead, for servers (e.g. llama-swap + EmbeddingGemma) that do not.
+  if (isRemoteModel(uri) && !forced) return query;
+  if (isQwen3EmbeddingModel(uri) || fmt === "qwen3") {
     return `Instruct: Retrieve relevant documents for the given query\nQuery: ${query}`;
   }
   return `task: search result | query: ${query}`;
@@ -114,12 +196,22 @@ export function formatQueryForEmbedding(query: string, modelUri?: string): strin
  * Format a document for embedding.
  * Uses nomic-style format with title and text fields (default).
  * Qwen3-Embedding encodes documents as raw text without special prefixes.
- * Remote models receive raw text (they handle their own formatting).
+ * Remote models receive raw text (they handle their own formatting), unless
+ * promptFormat opts in to client-side formatting.
  */
-export function formatDocForEmbedding(text: string, title?: string, modelUri?: string): string {
+export function formatDocForEmbedding(
+  text: string,
+  title?: string,
+  modelUri?: string,
+  promptFormat?: EmbedPromptFormat,
+): string {
   const uri = modelUri ?? resolveEmbedModel();
-  if (isRemoteModel(uri)) return title ? `${title}\n${text}` : text;
-  if (isQwen3EmbeddingModel(uri)) {
+  const fmt = promptFormat !== undefined
+    ? normaliseEmbedPromptFormat(promptFormat)
+    : resolveEmbedPromptFormat();
+  const forced = fmt !== "auto";
+  if (isRemoteModel(uri) && !forced) return title ? `${title}\n${text}` : text;
+  if (isQwen3EmbeddingModel(uri) || fmt === "qwen3") {
     // Qwen3-Embedding: documents are raw text, no task prefix
     return title ? `${title}\n${text}` : text;
   }

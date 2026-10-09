@@ -10,6 +10,23 @@
   the equivalent keys to `models:` in `index.yml`. Local generation and
   tokenization are preserved via a hybrid routing layer. Includes circuit
   breakers, dimension validation, and batch splitting.
+- Opt-in client-side prompt formatting for the remote embedder via
+  `embed_prompt_format` (`auto` | `embeddinggemma` | `qwen3`) in the `models:`
+  block of `index.yml`, or the `QMD_EMBED_PROMPT_FORMAT` env var. By default
+  remote text is passed through untouched (the server is assumed to apply
+  model-specific prefixes). Set `embeddinggemma` when the server does not —
+  e.g. llama-swap serving EmbeddingGemma — so the nomic/EmbeddingGemma task
+  prefixes are applied on the client. Note: switching this for an existing
+  index changes the embedding fingerprint and triggers a full re-embed.
+
+### Changed
+
+- Remote reranking failures now surface as errors instead of silently falling
+  back to the local reranker. The remote and local rerankers are different
+  cross-encoders, so a remote outage previously changed which documents were
+  returned behind a single line of stderr. Query expansion still falls back to
+  the local backend — that degrades result quality rather than swapping the
+  model that decides the results.
 
 ### Fixed
 

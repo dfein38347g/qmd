@@ -9,7 +9,7 @@ import { createServer, type Server, type IncomingMessage, type ServerResponse } 
 import { createConfiguredLLM } from "../src/configured-llm.js";
 import { RemoteLLM, remoteConfigFromEnv, type RemoteLLMConfig } from "../src/remote-llm.js";
 import { HybridLLM } from "../src/hybrid-llm.js";
-import { isRemoteModel, formatQueryForEmbedding, formatDocForEmbedding, getDefaultLLM, setDefaultLLM, LlamaCpp, resolveEmbedContextSize } from "../src/llm.js";
+import { isRemoteModel, formatQueryForEmbedding, formatDocForEmbedding, getDefaultLLM, setDefaultLLM, LlamaCpp, resolveEmbedContextSize, resolveEmbedPromptFormat } from "../src/llm.js";
 import type { LLM, EmbeddingResult, RerankResult, Queryable, GenerateResult, ModelInfo } from "../src/llm.js";
 
 // =============================================================================
@@ -589,7 +589,10 @@ describe("HybridLLM", () => {
     expect(result[0]!.text).toBe("expanded query");
   });
 
-  it("falls back to local rerank when configured remote rerank fails", async () => {
+  it("rejects instead of falling back to the local reranker when remote rerank fails", async () => {
+    // Previously this returned the local cross-encoder's scores. Rerank no longer
+    // falls back: a remote outage must not silently change which documents come
+    // back, so the underlying remote error propagates to the caller.
     setMockHandler(() => ({
       status: 500,
       body: { error: "rerank down" },
@@ -599,9 +602,22 @@ describe("HybridLLM", () => {
     const local = createMockLocalLLM();
     const hybrid = new HybridLLM(remote, local);
 
-    const result = await hybrid.rerank("query", [{ file: "doc.md", text: "doc text" }]);
-    expect(result.model).toBe("local-rerank-model");
-    expect(result.results).toEqual([{ file: "doc.md", score: 0.42, index: 0 }]);
+    await expect(
+      hybrid.rerank("query", [{ file: "doc.md", text: "doc text" }]),
+    ).rejects.toThrow("Rerank API returned 500");
+  });
+
+  it("rejects instead of falling back to the local reranker when remote rerank is not configured", async () => {
+    // supportsRerank === false used to route to local.rerank. Same reasoning as
+    // the remote-failure case: the model must not be swapped behind the caller's
+    // back, so the misconfiguration surfaces as an error instead.
+    const remote = createRemoteLLM();
+    const local = createMockLocalLLM();
+    const hybrid = new HybridLLM(remote, local);
+
+    await expect(
+      hybrid.rerank("query", [{ file: "doc.md", text: "doc text" }]),
+    ).rejects.toThrow("Remote rerank is not configured");
   });
 
   it("falls back to local expansion when configured remote expansion fails", async () => {
@@ -1119,6 +1135,34 @@ describe("formatQueryForEmbedding with remote models", () => {
   it("should add prefix for local nomic models", () => {
     expect(formatQueryForEmbedding("test query", "hf:ggml-org/embeddinggemma-300M-GGUF/embeddinggemma-300M-Q8_0.gguf")).toContain("task:");
   });
+
+  it("passes remote text through unchanged under the default (auto)", () => {
+    expect(formatQueryForEmbedding("test query", "BAAI/bge-m3")).toBe("test query");
+  });
+
+  it("applies the embeddinggemma query prefix to a remote model when opted in", () => {
+    expect(
+      formatQueryForEmbedding("test query", "BAAI/bge-m3", "embeddinggemma"),
+    ).toBe("task: search result | query: test query");
+  });
+
+  it("applies the embeddinggemma doc prefix to a remote model when opted in", () => {
+    expect(
+      formatDocForEmbedding("doc text", "My Title", "BAAI/bge-m3", "embeddinggemma"),
+    ).toBe("title: My Title | text: doc text");
+  });
+
+  it("uses 'title: none' for a remote doc with no title when opted in", () => {
+    expect(
+      formatDocForEmbedding("doc text", undefined, "BAAI/bge-m3", "embeddinggemma"),
+    ).toBe("title: none | text: doc text");
+  });
+
+  it("still passes remote text through under an unrecognised value", () => {
+    expect(
+      formatQueryForEmbedding("test query", "BAAI/bge-m3", "nonsense" as never),
+    ).toBe("test query");
+  });
 });
 
 describe("formatDocForEmbedding with remote models", () => {
@@ -1128,6 +1172,34 @@ describe("formatDocForEmbedding with remote models", () => {
 
   it("should include title when provided for remote models", () => {
     expect(formatDocForEmbedding("doc text", "My Title", "BAAI/bge-m3")).toBe("My Title\ndoc text");
+  });
+});
+
+describe("resolveEmbedPromptFormat precedence", () => {
+  // The index.yml path is memoized for the process lifetime, so it is covered
+  // by the manual out-of-process check in the task report rather than here.
+  // Both tests below short-circuit before the index.yml lookup is consulted.
+
+  it("prefers the env var over the index.yml value", () => {
+    const prev = process.env.QMD_EMBED_PROMPT_FORMAT;
+    try {
+      process.env.QMD_EMBED_PROMPT_FORMAT = "auto";
+      expect(resolveEmbedPromptFormat({ embed_prompt_format: "embeddinggemma" })).toBe("auto");
+    } finally {
+      if (prev === undefined) delete process.env.QMD_EMBED_PROMPT_FORMAT;
+      else process.env.QMD_EMBED_PROMPT_FORMAT = prev;
+    }
+  });
+
+  it("uses an explicitly passed config value", () => {
+    const prev = process.env.QMD_EMBED_PROMPT_FORMAT;
+    try {
+      delete process.env.QMD_EMBED_PROMPT_FORMAT;
+      expect(resolveEmbedPromptFormat({ embed_prompt_format: "embeddinggemma" })).toBe("embeddinggemma");
+    } finally {
+      if (prev === undefined) delete process.env.QMD_EMBED_PROMPT_FORMAT;
+      else process.env.QMD_EMBED_PROMPT_FORMAT = prev;
+    }
   });
 });
 

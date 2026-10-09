@@ -46,9 +46,9 @@ export class HybridLLM implements LLM {
   }
 
   get rerankModelName(): string {
-    if (this.remote instanceof RemoteLLM && !this.remote.supportsRerank) {
-      return this.local.rerankModelName;
-    }
+    // Always remote. rerank() throws when remote rerank is unconfigured, so
+    // advertising this.local.rerankModelName here would name a model that can
+    // never actually answer.
     return this.remote.rerankModelName;
   }
 
@@ -81,17 +81,19 @@ export class HybridLLM implements LLM {
   }
 
   async rerank(query: string, documents: RerankDocument[], options?: RerankOptions): Promise<RerankResult> {
-    // When remote is a RemoteLLM without a rerank model configured, fall back to local rerank
-    // (same fallback shape as expandQuery → local).
+    // Rerank deliberately does not fall back to the local cross-encoder the way
+    // expandQuery does. The remote and local rerankers are different models, so a
+    // silent substitution changes which documents are returned on the recall path
+    // behind a single line of stderr. Fail loudly instead.
     if (this.remote instanceof RemoteLLM && !this.remote.supportsRerank) {
-      return this.local.rerank(query, documents, options);
+      throw new Error(
+        `Remote rerank is not configured (rerank_api_url / rerank_api_model). ` +
+        `Refusing to fall back to the local reranker: silently substituting a different ` +
+        `cross-encoder changes recall without any signal. Set rerank_api_url and ` +
+        `rerank_api_model, or remove them both deliberately if local reranking is intended.`,
+      );
     }
-    try {
-      return await this.remote.rerank(query, documents, options);
-    } catch (error) {
-      console.error("Remote rerank failed; falling back to local rerank:", error);
-      return this.local.rerank(query, documents, options);
-    }
+    return this.remote.rerank(query, documents, options);
   }
 
   // Route to local
@@ -108,8 +110,10 @@ export class HybridLLM implements LLM {
   }
 
   async expandQuery(query: string, options?: LLMExpandQueryOptions): Promise<Queryable[]> {
-    // Route to remote when configured for it; otherwise local (same fallback
-    // shape as rerank → local when remote doesn't support rerank).
+    // Route to remote when configured for it; otherwise local. Unlike rerank,
+    // query expansion does fall back: a degraded expansion degrades result
+    // quality, whereas a rerank fallback silently swaps the model that decides
+    // which documents come back.
     if (this.remote instanceof RemoteLLM && this.remote.supportsExpand) {
       try {
         return await this.remote.expandQuery(query, options);

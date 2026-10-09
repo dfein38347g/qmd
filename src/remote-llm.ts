@@ -121,7 +121,7 @@ const RERANK_MIN_DOC_CHARS = 32;
  * True when a rerank request failed because the payload exceeded what the
  * server/model can process (the whole batch, or a single very long document).
  * Drives batch-splitting recovery; non-oversized errors propagate instead so
- * the circuit breaker / HybridLLM local fallback can react.
+ * the circuit breaker can react and HybridLLM can fail the call.
  */
 function isOversizedRerankError(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
@@ -358,7 +358,7 @@ export class RemoteLLM implements LLM {
     // oversized error we bisect the batch; a single oversized document is
     // halve-truncated down to a floor and re-scored on the truncated text.
     // Adapted from the recovery in tobi/qmd#619 (loopyd). Non-oversized errors
-    // propagate so the circuit breaker / HybridLLM local fallback can react.
+    // propagate so the circuit breaker can react and the caller can fail.
     const scoreBatch = async (
       batch: RerankDocument[],
       start: number,
