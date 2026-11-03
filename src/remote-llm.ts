@@ -473,6 +473,11 @@ export class RemoteLLM implements LLM {
     // can fall back to local expansion.
     const systemPrompt =
       "You expand search queries for a hybrid retrieval system. " +
+      "The input is often a long raw user message with conversational filler, " +
+      "instructions, pasted logs or changelogs, and typos. First distill the " +
+      "core search intent: the specific entities, technologies, tasks, and " +
+      "problems. Build every variant from that distilled intent only — drop " +
+      "filler and pasted document text, keep the 2-4 most distinctive terms. " +
       "Output 3 to 6 query variants, one per line, each prefixed with its type. " +
       "Types:\n" +
       "  lex  - keyword/BM25-friendly phrasing (extract distinctive terms)\n" +
@@ -500,9 +505,13 @@ export class RemoteLLM implements LLM {
         { role: "system", content: systemPrompt },
         { role: "user", content: userPrompt },
       ],
-      temperature: 0.7,
+      // Deterministic expansion: the recall pool must be stable across runs
+      // for the same query (temp 0.7 produced run-to-run-different pools).
+      temperature: 0,
       top_p: 0.8,
-      max_tokens: 600,
+      // Keyword-distilled variants are short; a smaller budget also shortens
+      // how long this request occupies the expand model's queue.
+      max_tokens: 400,
     });
 
     let content = "";
